@@ -1,0 +1,218 @@
+#include <Adafruit_BME280.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <ThingSpeak.h>
+#include <HardwareSerial.h>
+#include <MHZ19.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SH110X.h>
+
+/* Uncomment the initialize the I2C address, uncomment only one, If you get a totally blank screen try the other */
+#define i2c_Address 0x3c //initialize with the I2C addr 0x3C Typically eBay OLED's
+//#define i2c_Address 0x3d //initialize with the I2C addr 0x3D Typically Adafruit OLED's
+
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#define OLED_RESET -1    // QT-PY / XIAO
+
+#define BME280_ADDRESS 0x76 // Alamat I2C sensor BME280
+
+const char *ssid = "kost nara1";
+const char *password = "sijitekan101";
+const int CHANNEL_ID = 2566396;
+const char *apiKey = "SD2XONERYVEW3UX7";
+
+const int CHANNEL_ID3 = 2461739;
+const char *apikey3 = "Y7R0L1U8V9J1X6D3";
+
+// Tentukan posisi dan dimensi bar
+int barX = 0; // Posisi awal X
+int barY = 0; // Posisi Y
+int barWidth = 15; // Lebar bar
+int barHeight = 10; // Tinggi bar
+int barSpacing = 1; // Spasi antara bar
+
+WiFiClient client;
+Adafruit_BME280 bme;
+Adafruit_SH1106G display = Adafruit_SH1106G(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+HardwareSerial myserial(2);
+#define measurePin 34 //Connect dust sensor to Arduino A0 pin
+#define ledPower 33   //Connect 3 led driver pins of dust sensor to Arduino D2
+int samplingTime = 280; // time required to sample signal coming out of the sensor
+int deltaTime = 40; 
+int sleepTime = 9680;
+float voMeasured = 0;
+float calcVoltage = 0;
+float dustDensity = 0;
+
+
+MHZ19 mhz19;
+
+void setup() {
+  Serial.begin(9600);
+  connectWiFi();
+  pinMode(ledPower, OUTPUT);
+  myserial.begin(9600, SERIAL_8N1, 16, 17);
+  mhz19.begin(myserial);
+  mhz19.autoCalibration();
+
+  if (!bme.begin(BME280_ADDRESS)) {
+    Serial.println("Could not detect a BME280 sensor, Fix wiring Connections!");
+    while (1);
+  }
+  
+  if (!display.begin()) {
+    Serial.println(F("SH1106 allocation failed"));
+    for (;;);
+  }
+
+  ThingSpeak.begin(client);
+  display.display();
+  delay(2000);
+  display.clearDisplay();
+}
+
+void loop() {
+  // Baca sensor dan kirim data ke ThingSpeak
+  float temperature1=bme.readTemperature();
+  float temperature = temperature1 -3.5;
+  float pressure = bme.readPressure() / 100.0F;
+  float humidity = bme.readHumidity();
+  int co2 = mhz19.getCO2();
+  digitalWrite(ledPower, LOW); // power on the LED
+  delayMicroseconds(samplingTime);
+  voMeasured = analogRead(measurePin); // read the dust value
+  delayMicroseconds(deltaTime);
+  digitalWrite(ledPower, HIGH); // turn the LED off
+  delayMicroseconds(sleepTime);
+  // 0 - 5V mapped to 0 - 1023 integer values
+  // recover voltage
+  calcVoltage = voMeasured * (5.0 / 1024.0);
+  // linear equation taken from http://www.howmuchsnow.com/arduino/airquality/
+  // Chris Nafis (c) 2012
+  float dustDensity1 = 170 * calcVoltage - 0.1;
+  dustDensity = dustDensity1 / 10;
+  Serial.println(dustDensity); // unit: ug/m3
+  
+  // Retrieve occupant data from ThingSpeak
+  int occupant = getOccupantFromThingSpeak();
+  Serial.print("Occupant: ");
+  Serial.println(occupant);
+
+  senddatatothingspeak(temperature, humidity, pressure,co2, dustDensity);
+
+  // Tampilkan data di OLED
+  displayoled(temperature, humidity, co2, occupant);
+  delay(500); // Delay 0.5 detik sebelum iterasi berikutnya
+}
+
+int getOccupantFromThingSpeak() {
+  ThingSpeak.readLongField(CHANNEL_ID3, 3, apikey3); // Mengambil nilai occupant dari ThingSpeak
+  return ThingSpeak.readIntField(CHANNEL_ID3, 3);
+}
+
+void connectWiFi() {
+  Serial.print("Connecting to WiFi");
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+bool senddatatothingspeak(float temperature, float humidity, float pressure, int co2, int dustDensity) {
+  ThingSpeak.setField(1, temperature);
+  ThingSpeak.setField(2, humidity);
+  ThingSpeak.setField(3, pressure);
+  ThingSpeak.setField(5, co2);
+  ThingSpeak.setField(6, dustDensity);
+  
+  int httpCode = ThingSpeak.writeFields(CHANNEL_ID, apiKey);
+
+  if (httpCode > 0) {
+    Serial.println("Data Terkirim!");
+    delay(15000); // Delay 15 detik setelah pengiriman data
+    return true; // Kembalikan true jika pengiriman berhasil
+  } else {
+    Serial.println("Gagal terhubung ke ThingSpeak");
+    delay(15000); // Delay 15 detik meskipun pengiriman gagal
+    return false; // Kembalikan false jika pengiriman gagal
+  }
+}
+
+void displayoled(float temperature, float humidity, int co2, int occupant) {
+  // Bersihkan layar
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SH110X_WHITE);
+
+  // Tampilkan teks di sebelah kanan bar pertama
+  display.setCursor(barX + barWidth + 5, barY + 2);
+  display.println("<7 orang");
+  display.setCursor(barX + barWidth + 5, barY + barHeight + barSpacing + 2);
+  display.println("<14 orang");
+  display.setCursor(barX + barWidth + 5, barY + 2 * (barHeight + barSpacing) + 2);
+  display.println("OverCO2");
+
+  // Tampilkan nilai CO2 di sebelah teks "<7 orang"
+  int co2X = barX + barWidth + 5 + 65; // Mengatur posisi X untuk nilai CO2 (misalnya, diatur 40 piksel dari teks "<7 orang")
+  display.setCursor(co2X, barY + 2);
+  display.print("CO2: ");
+  display.setTextSize(2);
+  display.setCursor(80,25);
+  display.print(co2); // Menampilkan nilai CO2
+  display.setCursor(105,55);
+  display.setTextSize(1);
+  display.println("PPM");
+
+  // Tampilkan garis vertikal
+  int lineX = barX + barWidth + 5 + 55; // Posisi X untuk garis vertikal (di tengah antara teks "CO2:" dan nilai CO2)
+  int lineY1 = barY; // Posisi Y awal untuk garis vertikal (dari teks "<7 orang")
+  int lineY2 = barY + 2 * (barHeight + barSpacing)+64; // Posisi Y akhir untuk garis vertikal (sebelum teks "OverCO2")
+  display.drawFastVLine(lineX, lineY1, lineY2 - lineY1, SH110X_WHITE);
+
+  // Tampilkan garis horizontal di bawah teks "OverCO2"
+  int lineX1 = barX + barWidth + 0; // Posisi X awal untuk garis horizontal
+  int lineX2 = lineX1 + 70; // Posisi X akhir untuk garis horizontal (misalnya, 100 piksel ke kanan dari X awal)
+  int lineY = barY + 2 * (barHeight + barSpacing)+16 ; // Posisi Y untuk garis horizontal (di bawah teks "OverCO2" dengan sedikit spasi)
+  display.drawFastHLine(0, lineY, lineX2 - lineX1, SH110X_WHITE);
+
+  // Tentukan jumlah bar yang akan dinyalakan berdasarkan nilai occupant
+  int numberOfBars = min(occupant, 3);
+
+  // Tampilkan bar
+  for (int i = 0; i < 3; i++) {
+    if (i < numberOfBars) {
+      // Bar yang menyala
+      display.fillRect(barX, barY, barWidth, barHeight, SH110X_WHITE);
+    } else {
+      // Bar yang tidak menyala
+      display.fillRect(barX, barY, barWidth, barHeight, SH110X_BLACK);
+      display.drawRect(barX, barY, barWidth, barHeight, SH110X_WHITE);
+    }
+    // Geser posisi bar
+    barY += barHeight + barSpacing;
+  }
+
+  // Reset posisi awal barY untuk bar berikutnya
+  barY = 0;
+  // Tampilkan nilai-nilai parameter di layar
+  display.setTextSize(1);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(0, barY + 4 * (barHeight + barSpacing) + 2);
+  display.print("Temp: ");
+  display.println(temperature); // Menampilkan nilai temperatur
+  display.setCursor(0, barY + 5 * (barHeight + barSpacing) + 2);
+  display.print("Hum: ");
+  display.println(humidity); // Menampilkan nilai kelembaban
+  // Tampilkan di layar
+  display.display();
+}
